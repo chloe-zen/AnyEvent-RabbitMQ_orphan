@@ -672,7 +672,6 @@ sub _push_read_header_and_body {
             $self->{_content_queue}->get($w_next_frame);
         }
         else {
-            undef $next_frame;
             $frame->payload($body_payload);
             $response->{body} = $frame;
             $cb->($response);
