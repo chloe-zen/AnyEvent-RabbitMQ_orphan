@@ -8,6 +8,8 @@ use AnyEvent::RabbitMQ::LocalQueue;
 
 sub Dumper { goto &AnyEvent::RabbitMQ::Dumper }
 
+our $VERSION = '1.07';
+
 sub new {
     my $class = shift;
     my $self = bless {
@@ -44,7 +46,9 @@ sub open {
             $self->{_is_active} = 1;
             $args{on_success}->();
         },
-        $args{on_failure},
+        sub {
+            $args{on_failure}->(@_);
+        },
         $self->{id},
     );
 
@@ -57,21 +61,29 @@ sub close {
         or return;
     my %args = $connection->_set_cbs(@_);
 
-    return $self if !$self->{_is_open} || !$connection->{_is_open};
+    # Ensure to remove this channel from the connection even if we're not
+    # fully open to ensure $rf->close works always.
+    # FIXME - We can end up racing here so the server thinks the channel is
+    # open, but we've closed it - a more elegant fix would be to mark that
+    # the channel is opening, and wait for it to open before closing it
+    if (!$self->{_is_open}) {
+        $self->{connection}->delete_channel($self->{id});
+        $args{on_success}->($self);
+        return $self;
+    }
 
-    my $todo = keys %{$self->{_consumer_cbs}}
-      or return $self->_close(%args);
+    return $self->_close(%args) if 0 == scalar keys %{$self->{_consumer_cbs}};
 
-    my $failed;
-    my $cb = sub {
-        $self->_close(%args) unless --$todo;
-        $args{on_failure}->(@$failed) if $failed;
-    };
     for my $consumer_tag (keys %{$self->{_consumer_cbs}}) {
         $self->cancel(
             consumer_tag => $consumer_tag,
-            on_success   => $cb,
-            on_failure   => sub { $failed = \@_; $cb->() },
+            on_success   => sub {
+                $self->_close(%args);
+            },
+            on_failure   => sub {
+                $self->_close(%args);
+                $args{on_failure}->(@_);
+            }
         );
     }
 
@@ -660,6 +672,7 @@ sub _push_read_header_and_body {
             $self->{_content_queue}->get($w_next_frame);
         }
         else {
+            undef $next_frame;
             $frame->payload($body_payload);
             $response->{body} = $frame;
             $cb->($response);
